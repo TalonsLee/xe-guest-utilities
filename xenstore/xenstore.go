@@ -2,9 +2,11 @@ package main
 
 import (
 	xenstoreclient "../xenstoreclient"
+	"errors"
 	"fmt"
 	"golang.org/x/sys/unix"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -21,7 +23,8 @@ func usage() {
                 write key value [ key value ... ]
                 rm key [ key ... ]
                 exists key [ key ... ]
-                ls [ key ... ]`)
+                ls [ key ... ]
+                chmod key mode [modes...]`)
 }
 
 func new_xs() xenstoreclient.XenStoreClient {
@@ -172,11 +175,11 @@ func do_xs_ls(xs xenstoreclient.XenStoreClient, path string, depth int) {
 		col += n
 
 		if len(newPath) >= STRING_MAX {
-			fmt.Println(":")
+			fmt.Print(":")
 		} else {
 			val, err := xs.Read(newPath)
 			if err != nil {
-				fmt.Println(":")
+				fmt.Print(":")
 			} else {
 				val = sanitise_value(val)
 				if (col + len(val) + len(TAG)) > max_width {
@@ -184,12 +187,26 @@ func do_xs_ls(xs xenstoreclient.XenStoreClient, path string, depth int) {
 					if n < 0 {
 						n = 0
 					}
-					fmt.Printf(" = \"%s...\"\n", val[:n])
+					fmt.Printf(" = \"%s...\"", val[:n])
 				} else {
-					fmt.Printf(" = \"%s\"\n", val)
+					fmt.Printf(" = \"%s\"", val)
 				}
 			}
 		}
+
+		perms, err := xs.GetPermission(newPath)
+		if err == nil {
+			for k, p := range perms {
+				if k == 0 {
+					fmt.Printf("\t(%s%d", p.Pe.ToStr(), p.Id)
+				} else {
+					fmt.Printf(",%s%d", p.Pe.ToStr(), p.Id)
+				}
+			}
+			fmt.Printf(")")
+		}
+
+		fmt.Println()
 
 		do_xs_ls(xs, newPath, depth+1)
 	}
@@ -219,6 +236,53 @@ func xs_ls(script_name string, args []string) {
 				do_xs_ls(xs, strings.TrimRight(domain_path, "\x00"), 0)
 			}
 		}
+	}
+}
+
+func xs_chmod(script_name string, args []string) {
+	if len(args) == 0 || args[0] == "-h" || len(args) < 2 {
+		die("Usage: %s key mode [modes...]", script_name)
+	}
+
+	var err error
+	key := args[0]
+	var perms []xenstoreclient.Permission
+
+	for _, m := range args[1:] {
+		if len(m) > 1 {
+			var p xenstoreclient.Permission
+			switch m[0] {
+			case 'n':
+				p.Pe = xenstoreclient.PERM_NONE
+			case 'r':
+				p.Pe = xenstoreclient.PERM_READ
+			case 'w':
+				p.Pe = xenstoreclient.PERM_WRITE
+			case 'b':
+				p.Pe = xenstoreclient.PERM_READWRITE
+			default:
+				err = errors.New("Invalid mode string")
+			}
+			if err == nil {
+				var id uint64
+				id, err = strconv.ParseUint(m[1:], 10, 0)
+				if err == nil {
+					p.Id = uint(id)
+					perms = append(perms, p)
+				}
+			}
+		} else {
+			err = errors.New("Invalid mode string")
+		}
+		if err != nil {
+			die("%s error: %v", script_name, err)
+		}
+	}
+
+	xs := new_xs()
+	err = xs.SetPermission(key, perms)
+	if err != nil {
+		die("%s error: %v", script_name, err)
 	}
 }
 
@@ -252,6 +316,8 @@ func main() {
 		xs_exists(script_name, args)
 	case "ls":
 		xs_ls(script_name, args)
+	case "chmod":
+		xs_chmod(script_name, args)
 	default:
 		usage()
 	}
